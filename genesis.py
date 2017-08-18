@@ -2,11 +2,11 @@ import hashlib, binascii, struct, array, os, time, sys, optparse
 import scrypt
 
 from construct import *
-
-
+lastnonce = 0
 def main():
   options = get_args()
-
+  global lastnonce
+  lastnonce = options.minnonce
   algorithm = get_algorithm(options)
 
   input_script  = create_input_script(options.timestamp)
@@ -16,8 +16,8 @@ def main():
   hash_merkle_root = hashlib.sha256(hashlib.sha256(tx).digest()).digest()
   print_block_info(options, hash_merkle_root)
 
-  block_header        = create_block_header(hash_merkle_root, options.time, options.bits, options.nonce)
-  genesis_hash, nonce = generate_hash(block_header, algorithm, options.nonce, options.bits)
+  block_header        = create_block_header(hash_merkle_root, options.time, options.bits, options.minnonce)
+  genesis_hash, nonce = generate_hash(block_header, algorithm, options.minnonce, options.maxnonce, options.bits)
   announce_found_genesis(genesis_hash, nonce)
 
 
@@ -27,7 +27,9 @@ def get_args():
                    type="int", help="the (unix) time when the genesisblock is created")
   parser.add_option("-z", "--timestamp", dest="timestamp", default="The Times 03/Jan/2009 Chancellor on brink of second bailout for banks",
                    type="string", help="the pszTimestamp found in the coinbase of the genesisblock")
-  parser.add_option("-n", "--nonce", dest="nonce", default=0,
+  parser.add_option("-n", "--minnonce", dest="minnonce", default=0,
+                   type="int", help="the first value of the nonce that will be incremented when searching the genesis hash")
+  parser.add_option("-x", "--maxnonce", dest="maxnonce", default=pow(2, 32),
                    type="int", help="the first value of the nonce that will be incremented when searching the genesis hash")
   parser.add_option("-a", "--algorithm", dest="algorithm", default="SHA256",
                     help="the PoW algorithm: [SHA256|scrypt|X11|X13|X15]")
@@ -121,7 +123,7 @@ def create_block_header(hash_merkle_root, time, bits, nonce):
 
 
 # https://en.bitcoin.it/wiki/Block_hashing_algorithm
-def generate_hash(data_block, algorithm, start_nonce, bits):
+def generate_hash(data_block, algorithm, start_nonce, end_nonce, bits):
   print 'Searching for genesis hash..'
   nonce           = start_nonce
   last_updated    = time.time()
@@ -130,14 +132,17 @@ def generate_hash(data_block, algorithm, start_nonce, bits):
 
   while True:
     sha256_hash, header_hash = generate_hashes_from_block(data_block, algorithm)
-    last_updated             = calculate_hashrate(nonce, last_updated)
+    last_updated = calculate_hashrate(end_nonce, nonce, last_updated)
     if is_genesis_hash(header_hash, target):
       if algorithm == "X11" or algorithm == "X13" or algorithm == "X15":
         return (header_hash, nonce)
       return (sha256_hash, nonce)
     else:
-     nonce      = nonce + 1
-     data_block = data_block[0:len(data_block) - 4] + struct.pack('<I', nonce)  
+      if nonce == end_nonce:
+        sys.exit("\nCannot find a genesis hash within bounds.")
+      else:
+        nonce      = nonce + 1
+        data_block = data_block[0:len(data_block) - 4] + struct.pack('<I', nonce)  
 
 
 def generate_hashes_from_block(data_block, algorithm):
@@ -172,13 +177,15 @@ def is_genesis_hash(header_hash, target):
   return int(header_hash.encode('hex_codec'), 16) < target
 
 
-def calculate_hashrate(nonce, last_updated):
-  if nonce % 1000000 == 999999:
+def calculate_hashrate(end_nonce, nonce, last_updated):
+  global lastnonce
+  if (time.time()-last_updated) >= 1:
     now             = time.time()
-    hashrate        = round(1000000/(now - last_updated))
-    generation_time = round(pow(2, 32) / hashrate / 3600, 1)
-    sys.stdout.write("\r%s hash/s, estimate: %s h"%(str(hashrate), str(generation_time)))
+    hashrate        = round(nonce - lastnonce)
+    generation_time = round((end_nonce-nonce+1) / hashrate / 60, 1)
+    sys.stdout.write("\r%s hash/s, estimate: %s min, nonce: %s"%(str(hashrate), str(generation_time), str(nonce)))
     sys.stdout.flush()
+    lastnonce = nonce
     return now
   else:
     return last_updated
